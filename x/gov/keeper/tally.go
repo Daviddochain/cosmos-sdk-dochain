@@ -141,7 +141,13 @@ func (k Keeper) getCurrentValidators(ctx context.Context) (map[string]v1.Validat
 }
 
 // Tally iterates over the votes and updates the tally of a proposal based on the voting power of the
-// voters
+// voters.
+//
+// DoChain governance customisation:
+// - quorum is disabled
+// - NoWithVeto cannot veto/fail/burn a proposal
+// - abstain is removed from the pass/fail voting total
+// - only Yes vs No decides whether a proposal passes
 func (k Keeper) Tally(ctx context.Context, proposal v1.Proposal) (passes, burnDeposits bool, tallyResults v1.TallyResult, err error) {
 	currValidators, err := k.getCurrentValidators(ctx)
 	if err != nil {
@@ -156,8 +162,7 @@ func (k Keeper) Tally(ctx context.Context, proposal v1.Proposal) (passes, burnDe
 
 	tallyResults = v1.NewTallyResultFromMap(results)
 
-	// TODO: Upgrade the spec to cover all of these cases & remove pseudocode.
-	// If there is no staked coins, the proposal fails
+	// If there is no staked coins, the proposal fails.
 	totalBonded, err := k.sk.TotalBondedTokens(ctx)
 	if err != nil {
 		return false, false, tallyResults, err
@@ -172,26 +177,14 @@ func (k Keeper) Tally(ctx context.Context, proposal v1.Proposal) (passes, burnDe
 		return false, false, tallyResults, fmt.Errorf("error while getting params: %w", err)
 	}
 
-	// If there is not enough quorum of votes, the proposal fails
-	percentVoting := totalVotingPower.Quo(math.LegacyNewDecFromInt(totalBonded))
-	quorum, _ := math.LegacyNewDecFromStr(params.Quorum)
-	if percentVoting.LT(quorum) {
-		return false, params.BurnVoteQuorum, tallyResults, nil
-	}
+	// DoChain: abstain votes are excluded from pass/fail calculation.
+	nonAbstainVotingPower := totalVotingPower.Sub(results[v1.OptionAbstain])
 
-	// If no one votes (everyone abstains), proposal fails
-	if totalVotingPower.Sub(results[v1.OptionAbstain]).Equal(math.LegacyZeroDec()) {
+	// If no one votes Yes/No, proposal fails.
+	if nonAbstainVotingPower.Equal(math.LegacyZeroDec()) {
 		return false, false, tallyResults, nil
 	}
 
-	// If more than 1/3 of voters veto, proposal fails
-	vetoThreshold, _ := math.LegacyNewDecFromStr(params.VetoThreshold)
-	if results[v1.OptionNoWithVeto].Quo(totalVotingPower).GT(vetoThreshold) {
-		return false, params.BurnVoteVeto, tallyResults, nil
-	}
-
-	// If more than 1/2 of non-abstaining voters vote Yes, proposal passes
-	// For expedited 2/3
 	var thresholdStr string
 	if proposal.Expedited {
 		thresholdStr = params.GetExpeditedThreshold()
@@ -201,10 +194,10 @@ func (k Keeper) Tally(ctx context.Context, proposal v1.Proposal) (passes, burnDe
 
 	threshold, _ := math.LegacyNewDecFromStr(thresholdStr)
 
-	if results[v1.OptionYes].Quo(totalVotingPower.Sub(results[v1.OptionAbstain])).GT(threshold) {
+	// DoChain: proposal passes only if Yes beats the threshold against non-abstain votes.
+	if results[v1.OptionYes].Quo(nonAbstainVotingPower).GT(threshold) {
 		return true, false, tallyResults, nil
 	}
 
-	// If more than 1/2 of non-abstaining voters vote No, proposal fails
 	return false, false, tallyResults, nil
 }
